@@ -7,6 +7,7 @@ Personal Homebrew tap for custom formulas.
 ```sh
 brew tap mattmc3/tools
 brew install prj
+brew install pather
 ```
 
 ## Updating Formulas
