@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+#
+# Update SHA256 checksums for Homebrew formulas
+# Usage:
+#   ./update-formula-sha.sh              # Update all formulas
+#   ./update-formula-sha.sh prj          # Update specific formula
+#   ./update-formula-sha.sh prj v1.0.2   # Update formula to new version
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to extract GitHub repo from homepage or URL
+extract_github_repo() {
+  local input
+  input="$1"
+  if [[ $input =~ github\.com/([^/]+/[^/]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+# Function to get latest tag from GitHub
+get_latest_tag() {
+  local repo latest
+  repo="$1"
+
+  # Get latest tag using GitHub API
+  latest=$(curl -s "https://api.github.com/repos/${repo}/tags" | grep '"name":' | head -1 | sed -E 's/.*"name": "([^"]+)".*/\1/')
+  if [ -n "$latest" ]; then
+    echo "$latest"
+    return 0
+  fi
+
+  return 1
+}
+
+# Function to process a single formula
+process_formula() {
+  local formula_file new_version formula_name homepage current_url repo version url temp_file sha256 current_sha
+
+  formula_file="$1"
+  new_version="$2"
+  formula_name=$(basename "$formula_file" .rb)
+
+  echo -e "${YELLOW}Processing formula: $formula_name${NC}"
+
+  # Extract homepage and current URL from formula file
+  homepage=$(grep -E '^\s*homepage\s+"' "$formula_file" | sed 's/.*homepage "\(.*\)".*/\1/')
+  current_url=$(grep -E '^\s*url\s+"' "$formula_file" | sed 's/.*url "\(.*\)".*/\1/')
+
+  # Extract GitHub repo from homepage or URL
+  repo=""
+  if [ -n "$homepage" ]; then
+    repo=$(extract_github_repo "$homepage")
+  fi
+  if [ -z "$repo" ] && [ -n "$current_url" ]; then
+    repo=$(extract_github_repo "$current_url")
+  fi
+
+  if [ -z "$repo" ]; then
+    echo -e "${RED}❌ Could not determine GitHub repo from homepage or URL${NC}"
+    return 1
+  fi
+
+  echo "GitHub repo: $repo"
+
+  # Determine version to use
+  version="$new_version"
+  if [ -z "$version" ]; then
+    # No version provided, get latest tag
+    echo "No version specified, fetching latest tag..."
+    version=$(get_latest_tag "$repo")
+    if [ -z "$version" ]; then
+      echo -e "${RED}❌ Could not determine version. Please specify a version tag.${NC}"
+      return 1
+    fi
+    echo "Latest version: $version"
+  fi
+
+  if [ -z "$version" ]; then
+    echo -e "${RED}❌ Could not determine version${NC}"
+    return 1
+  fi
+
+  # Construct the tarball URL
+  url="https://github.com/${repo}/archive/refs/tags/${version}.tar.gz"
+  echo "URL: $url"
+
+  # Download the tarball
+  temp_file=$(mktemp)
+  echo "Downloading tarball..."
+  if ! curl -L -f -s -o "$temp_file" "$url"; then
+    echo -e "${RED}❌ Failed to download $url${NC}"
+    rm -f "$temp_file"
+    return 1
+  fi
+
+  # Calculate SHA256
+  sha256=$(shasum -a 256 "$temp_file" | awk '{print $1}')
+  echo "Calculated SHA256: $sha256"
+
+  # Check current SHA256 in formula
+  current_sha=$(grep -E '^\s*sha256\s+"' "$formula_file" | sed 's/.*sha256 "\(.*\)".*/\1/')
+
+  # Check if update is needed
+  if [ "$current_sha" = "$sha256" ] && [ "$current_url" = "$url" ]; then
+    echo -e "${GREEN}✓ Formula already up to date for $formula_name${NC}"
+    rm -f "$temp_file"
+    return 0
+  fi
+
+  # Update both URL and SHA256
+  sed -i.bak "s|url \".*\"|url \"$url\"|g" "$formula_file"
+  sed -i.bak "s|sha256 \".*\"|sha256 \"$sha256\"|g" "$formula_file"
+  rm -f "${formula_file}.bak"
+
+  if [ -n "$new_version" ]; then
+    echo -e "${GREEN}✓ Updated $formula_name to $version${NC}"
+  else
+    echo -e "${GREEN}✓ Updated $formula_name (URL: $url, SHA256: $sha256)${NC}"
+  fi
+
+  rm -f "$temp_file"
+}
+
+# Main script
+main() {
+  local formula_name new_version formula_file
+
+  formula_name="$1"
+  new_version="$2"
+
+  if [ -z "$formula_name" ]; then
+    # Process all formulas
+    echo "Processing all formulas..."
+    for formula_file in Formula/*.rb; do
+      if [ -f "$formula_file" ]; then
+        process_formula "$formula_file" "" || true
+        echo ""
+      fi
+    done
+  else
+    # Process specific formula
+    formula_file="Formula/${formula_name}.rb"
+    if [ ! -f "$formula_file" ]; then
+      echo -e "${RED}❌ Formula file not found: $formula_file${NC}"
+      exit 1
+    fi
+    process_formula "$formula_file" "$new_version"
+  fi
+}
+
+main "$@"
